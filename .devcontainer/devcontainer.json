@@ -1,0 +1,55 @@
+{
+  "name": "lerobot-dev",
+  "build": {
+    "dockerfile": "../docker/Dockerfile.user",
+    "context": ".."
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/lerobot,type=bind",
+  "workspaceFolder": "/lerobot",
+
+
+  "settings": {
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "python.defaultInterpreterPath": "/lerobot/.venv/bin/python"
+  },
+
+  "remoteUser": "user_lerobot",
+
+  "runArgs": [
+    "--gpus=all",                // full GPU access
+    "--runtime=nvidia",          // ensure NVIDIA runtime is used
+    "--privileged",              // for EGL / low-level access
+    "--network=host",
+    "--shm-size=16g",
+    "--ipc=host",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt=seccomp=unconfined"
+  ],
+
+  "mounts": [
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached"
+  ],
+
+  "containerEnv": {
+    "MUJOCO_GL": "egl",
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "XAUTHORITY": "${localEnv:XAUTHORITY}"
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+
+  "postCreateCommand": "uv venv && uv pip install -e .[all]",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "ms-vscode.cpptools",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  }
+}
