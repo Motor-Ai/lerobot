@@ -4,6 +4,11 @@ from transformers import AutoProcessor, BitsAndBytesConfig, AutoModelForImageTex
 from datasets import load_dataset
 from torch.nn.utils.rnn import pad_sequence
 
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from mai.utils.utils import target_in_ego
+
 
 SMOL = True
 MODEL_ID = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if SMOL else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
@@ -72,8 +77,26 @@ def train(model, processor, dataset):
             episode_idx = example["episode_index"]
             example["video_path"] = f"{VIDEO_BASE_PATH}/episode_{episode_idx:06d}.mp4"
 
+            # Extract values
+            lat0 = example["observation.state.vehicle"][3]   # hp_loc_latitude
+            lon0 = example["observation.state.vehicle"][4]   # hp_loc_longitude
+            heading_deg = example["observation.state.vehicle"][1]
+
+            # last waypoint as target (lat, lon) => note your arrays are [X=lon list], [Y=lat list]
+            target_lon = example["observation.state.waypoints"][0][-1]
+            target_lat = example["observation.state.waypoints"][1][-1]
+
+            x_fwd, y_left, z_up = target_in_ego(lat0, lon0, heading_deg, target_lat, target_lon)
+
+            # Build dynamic text
+            text_instruction = (
+                f"Current speed: {example['observation.state.vehicle'][0]:.3f}. "
+                f"Target (in ego frame): x={x_fwd:.2f} m, y={y_left:.2f} m. "
+                "Drive to the target while adhering to traffic rules and regulations."
+            )
+            
             user_content = [{"type": "text", 
-                             "text": "Follow the waypoints while adhering to traffic rules and regulations"}]
+                             "text": f"{text_instruction}"}]
             user_content.append({"type": "video", 
                                  "path": example["video_path"], 
                                  "max_pixels": 360 * 420, 
@@ -151,8 +174,8 @@ def train(model, processor, dataset):
     model_name = MODEL_ID.split("/")[-1]
 
     training_args = TrainingArguments(
-        num_train_epochs=1,
-        per_device_train_batch_size=4,
+        num_train_epochs=5,
+        per_device_train_batch_size=8,
         gradient_accumulation_steps=1,
         warmup_steps=50,
         learning_rate=1e-4,
