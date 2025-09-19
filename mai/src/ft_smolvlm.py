@@ -12,7 +12,7 @@ from mai.utils.utils import target_in_ego
 
 SMOL = True
 MODEL_ID = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if SMOL else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-DEVICE = "auto"
+DEVICE = "cuda:2"
 VIDEO_BASE_PATH = "/home/user_lerobot/.cache/huggingface/lerobot/yaak-ai/lerobot-driving-school/videos/chunk-000/observation.images.front_left"
 
 

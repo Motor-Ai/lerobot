@@ -11,8 +11,9 @@ from peft import PeftModel
 DATASET_NAME = "yaak-ai/lerobot-driving-school"
 BASE_MODEL = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
 ADAPTER_PATH = "./outputs/bs_8_SmolVLM2-500M-Video-Instruct-driving_last"
-DEVICE = "cuda:2"
+DEVICE = "cuda:1"
 USE_FINETUNED = True  # switch between base and finetuned
+EVAL_VIDEO_PATH = "/home/user_lerobot/.cache/huggingface/lerobot/yaak-ai/lerobot-driving-school/videos/chunk-000/observation.images.front_center/episode_000003.mp4"
 # -----------------------------
 
 
@@ -56,7 +57,7 @@ def evaluate(model, processor):
                 {"type": "text", "text": "Follow the waypoints while adhering to traffic rules and regulations"},
                 {
                     "type": "video",
-                    "path": "/home/user_lerobot/.cache/huggingface/lerobot/yaak-ai/lerobot-driving-school/videos/chunk-000/observation.images.front_center/episode_000003.mp4",
+                    "path": EVAL_VIDEO_PATH,
                 },
             ],
         }
@@ -67,7 +68,16 @@ def evaluate(model, processor):
         tokenize=True,
         return_dict=True,
         return_tensors="pt",
-    ).to(DEVICE).to(model.dtype)
+    ) #.to(DEVICE).to(model.dtype)
+
+    inputs = {
+            k: (
+                v.to(model.device, dtype=model.dtype) if k == "pixel_values"
+                else v.to(model.device) if torch.is_tensor(v)
+                else v
+            )
+            for k, v in inputs.items()
+        }
 
     generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=64)
     generated_texts = processor.batch_decode(
@@ -80,9 +90,15 @@ def evaluate(model, processor):
 
 
 def main():
+    base_model, base_processor = load_trained_model(use_finetuned=False)
     model, processor = load_trained_model(use_finetuned=USE_FINETUNED)
 
+    print("\n--- Evaluating Base Model ---")
+    evaluate(base_model, base_processor)
+    print("\n---" + "-"*30)
+    print("\n--- Evaluating Finetuned Model ---")
     evaluate(model, processor)
+    print("\n---" + "-"*30)
 
 
 if __name__ == "__main__":
