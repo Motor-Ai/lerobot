@@ -176,3 +176,31 @@ def preprocess_dataset(
         state_buf.popleft()
 
     return out
+
+
+from scipy.signal import savgol_filter
+
+def smooth_traj(traj, window=21, poly=3):
+    """
+    Smooth trajectory using Savitzky-Golay filter.
+    
+    Args:
+        traj: (N, 3) array [x, y, yaw]
+        window: odd int, filter window size
+        poly: polynomial order
+    
+    Returns:
+        traj_smooth: (N, 3) array smoothed
+    """
+    if len(traj) < window:
+        return traj  # not enough points to smooth
+
+    x_smooth = savgol_filter(traj[:, 0], window, poly)
+    y_smooth = savgol_filter(traj[:, 1], window, poly)
+
+    # Recompute yaw from smoothed coords
+    dx = np.gradient(x_smooth)
+    dy = np.gradient(y_smooth)
+    yaw_smooth = np.arctan2(dy, dx)
+
+    return np.stack([x_smooth, y_smooth, yaw_smooth], axis=1).astype(np.float32)

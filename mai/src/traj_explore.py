@@ -10,6 +10,8 @@ from datasets import load_dataset
 import math
 import cv2 
 
+from mai.utils.dataset import smooth_traj
+
 def ego_xy_geodesy(lat0, lon0, lat, lon):
     """
     Convert (lat, lon) into local ENU coordinates (x_east, y_north) in meters,
@@ -44,7 +46,7 @@ def ego_xy_geodesy(lat0, lon0, lat, lon):
 # -------------------
 DATASET_NAME = "yaak-ai/lerobot-driving-school"
 VIDEO_BASE_PATH = "/home/user_lerobot/.cache/huggingface/lerobot/yaak-ai/lerobot-driving-school/videos/chunk-000/observation.images.front_left"
-OUTPUT_DIR = "./mai/outputs/gifs"
+OUTPUT_DIR = "./mai/outputs/gifs_corrected_traj"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
@@ -103,8 +105,12 @@ def convert_episode_to_global(samples):
         x_final, y_final = ego_xy_geodesy(lat0, lon0, wp_lat_final, wp_lon_final)
         targets_final.append([x_final, y_final])
 
+    traj = np.array(traj, dtype=np.float32)
+    traj_smooth = smooth_traj(traj)  
+
+    
     return (
-        np.array(traj, dtype=np.float32),
+        traj, traj_smooth,
         [np.array(targets_mid, dtype=np.float32),
         np.array(targets_final, dtype=np.float32)]
     )
@@ -115,7 +121,7 @@ def convert_episode_to_global(samples):
 # GIF Creation
 # -------------------
 
-def create_episode_gif(ep_id, samples, traj, targets):
+def create_episode_gif(ep_id, samples, traj, traj_smooth, targets):
     """
     Create a GIF for one episode:
       - Left: video frame
@@ -143,15 +149,19 @@ def create_episode_gif(ep_id, samples, traj, targets):
 
         # --- Right: global trajectory ---
         axes[1].plot(traj[:, 0], traj[:, 1], "k--", alpha=0.6, label="Trajectory")
-        
+        axes[1].plot(traj_smooth[:, 0], traj_smooth[:, 1], "g-", alpha=0.9, label="Smoothed traj")
+    
         for i in range(len(targets)):
             axes[1].scatter(targets[i][idx, 0], targets[i][idx, 1], 
                             c="blue", marker="x", s=80, label="Target")
 
         # Ego pointer
         x, y, yaw = traj[idx]
+        xs, ys, yaws = traj_smooth[idx]
         axes[1].quiver(x, y, np.cos(yaw), np.sin(yaw),
                        scale=20, color="red", width=0.005, label="Ego pose")
+        axes[1].quiver(xs, ys, np.cos(yaws), np.sin(yaws), 
+                       scale=20, color="green", width=0.005, label="Ego smooth")
         axes[1].set_xlabel("East (m)")
         axes[1].set_ylabel("North (m)")
         axes[1].axis("equal")
@@ -187,5 +197,5 @@ if __name__ == "__main__":
     print(f"Loaded {len(episodes)} episodes")
 
     for ep_id, samples in episodes.items():
-        traj, targets = convert_episode_to_global(samples)
-        create_episode_gif(ep_id, samples, traj, targets)
+        traj, traj_smooth, targets = convert_episode_to_global(samples)
+        create_episode_gif(ep_id, samples, traj, traj_smooth, targets)
