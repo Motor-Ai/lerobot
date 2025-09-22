@@ -10,7 +10,7 @@ from datasets import load_dataset
 import math
 import cv2 
 
-from mai.utils.dataset import smooth_traj
+from mai.utils.dataset import smooth_traj_global
 
 def ego_xy_geodesy(lat0, lon0, lat, lon):
     """
@@ -48,6 +48,7 @@ DATASET_NAME = "yaak-ai/lerobot-driving-school"
 VIDEO_BASE_PATH = "/home/user_lerobot/.cache/huggingface/lerobot/yaak-ai/lerobot-driving-school/videos/chunk-000/observation.images.front_left"
 OUTPUT_DIR = "./mai/outputs/gifs_corrected_traj"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+SAVE_AS_MP4 = True
 
 
 # -------------------
@@ -80,6 +81,7 @@ def convert_episode_to_global(samples):
     traj = []
     targets_mid = []
     targets_final = []
+    all_speeds = []
 
     for ex in samples:
         # --- Ego pose ---
@@ -104,12 +106,16 @@ def convert_episode_to_global(samples):
         wp_lon_final = ex["observation.state.waypoints"][0][target_mid_index]
         x_final, y_final = ego_xy_geodesy(lat0, lon0, wp_lat_final, wp_lon_final)
         targets_final.append([x_final, y_final])
+        all_speeds.append(ex["observation.state.vehicle"][0])
 
+    
+    all_speeds = np.array(all_speeds, dtype=np.float32)
     traj = np.array(traj, dtype=np.float32)
-    traj_smooth = smooth_traj(traj)  
+    traj_smooth = smooth_traj_global(traj=traj, speed=all_speeds)  
 
     
     return (
+        all_speeds,
         traj, traj_smooth,
         [np.array(targets_mid, dtype=np.float32),
         np.array(targets_final, dtype=np.float32)]
@@ -121,54 +127,74 @@ def convert_episode_to_global(samples):
 # GIF Creation
 # -------------------
 
-def create_episode_gif(ep_id, samples, traj, traj_smooth, targets):
+def create_episode_gif(ep_id, samples, traj, traj_smooth, targets, speeds, save_as_mp4=SAVE_AS_MP4):
     """
-    Create a GIF for one episode:
-      - Left: video frame
-      - Right: trajectory with current ego pose pointer
+    Create a GIF or MP4 for one episode:
+      - Left top: video frame
+      - Left bottom: zoomed-in traj around ego pose
+      - Right: full global trajectory
+
+    Args:
+        save_as_mp4 (bool): if True saves MP4, else saves GIF
     """
     video_path = f"{VIDEO_BASE_PATH}/episode_{ep_id:06d}.mp4"
     reader = imageio.get_reader(video_path, "ffmpeg")
     frames = []
 
     for idx, ex in enumerate(samples):
-        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        fig = plt.figure(figsize=(24, 12))
+        gs = fig.add_gridspec(2, 2, width_ratios=[1, 1], height_ratios=[1, 1])
 
-        # --- Left: video frame ---
+        # --- Left Top: video frame ---
+        ax_frame = fig.add_subplot(gs[0, 0])
         frame = reader.get_data(ex["frame_index"])
-
-        # resize *here* before plotting
         scale = 0.5
         h0, w0 = frame.shape[:2]
         new_w, new_h = int(w0 * scale), int(h0 * scale)
         frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        axes[0].imshow(frame)
-        axes[0].axis("off")
-        axes[0].set_title(f"Episode {ep_id} | Frame {idx}")
+        ax_frame.imshow(frame)
+        ax_frame.axis("off")
+        ax_frame.set_title(f"Episode {ep_id} | Frame {idx}\nSpeed: {speeds[idx]:.1f} km/h")
 
-        # --- Right: global trajectory ---
-        axes[1].plot(traj[:, 0], traj[:, 1], "k--", alpha=0.6, label="Trajectory")
-        axes[1].plot(traj_smooth[:, 0], traj_smooth[:, 1], "g-", alpha=0.9, label="Smoothed traj")
-    
-        for i in range(len(targets)):
-            axes[1].scatter(targets[i][idx, 0], targets[i][idx, 1], 
-                            c="blue", marker="x", s=80, label="Target")
-
-        # Ego pointer
+        # --- Left Bottom: zoomed-in traj ---
+        ax_zoom = fig.add_subplot(gs[1, 0])
         x, y, yaw = traj[idx]
         xs, ys, yaws = traj_smooth[idx]
-        axes[1].quiver(x, y, np.cos(yaw), np.sin(yaw),
-                       scale=20, color="red", width=0.005, label="Ego pose")
-        axes[1].quiver(xs, ys, np.cos(yaws), np.sin(yaws), 
-                       scale=20, color="green", width=0.005, label="Ego smooth")
-        axes[1].set_xlabel("East (m)")
-        axes[1].set_ylabel("North (m)")
-        axes[1].axis("equal")
-        axes[1].grid(True)
-        axes[1].legend()
 
-        # Save frame to array
+        ax_zoom.plot(traj[:, 0], traj[:, 1], "k--", alpha=0.4, label="Raw traj")
+        ax_zoom.plot(traj_smooth[:, 0], traj_smooth[:, 1], "g-", alpha=0.8, label="Smoothed traj")
+        ax_zoom.quiver(x, y, np.cos(yaw), np.sin(yaw), scale=20, color="red", width=0.01, label="Ego raw")
+        ax_zoom.quiver(xs, ys, np.cos(yaws), np.sin(yaws), scale=20, color="green", width=0.01, label="Ego smooth")
+
+        ax_zoom.set_title("Zoomed-in trajectory")
+        ax_zoom.set_aspect("equal", adjustable="box")
+        zoom_size = 5
+        ax_zoom.set_xlim([xs - zoom_size, xs + zoom_size])
+        ax_zoom.set_ylim([ys - zoom_size, ys + zoom_size])
+        ax_zoom.grid(True)
+        ax_zoom.legend(loc="upper right")
+
+        # --- Right: full global trajectory ---
+        ax_full = fig.add_subplot(gs[:, 1])
+        ax_full.plot(traj[:, 0], traj[:, 1], "k--", alpha=0.6, label="Raw traj")
+        ax_full.plot(traj_smooth[:, 0], traj_smooth[:, 1], "g-", alpha=0.9, label="Smoothed traj")
+
+        for i in range(len(targets)):
+            ax_full.scatter(targets[i][idx, 0], targets[i][idx, 1],
+                            c="blue", marker="x", s=80, label="Target")
+
+        ax_full.quiver(x, y, np.cos(yaw), np.sin(yaw), scale=20, color="red", width=0.005, label="Ego raw")
+        ax_full.quiver(xs, ys, np.cos(yaws), np.sin(yaws), scale=20, color="green", width=0.005, label="Ego smooth")
+
+        ax_full.set_xlabel("East (m)")
+        ax_full.set_ylabel("North (m)")
+        ax_full.set_title("Global trajectory")
+        ax_full.axis("equal")
+        ax_full.grid(True)
+        ax_full.legend()
+
+        # Save frame
         fig.canvas.draw()
         w, h = fig.canvas.get_width_height()
         img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
@@ -176,12 +202,16 @@ def create_episode_gif(ep_id, samples, traj, traj_smooth, targets):
         frames.append(img)
         plt.close(fig)
 
-
     reader.close()
 
-    # Save GIF
-    out_path = os.path.join(OUTPUT_DIR, f"episode_{ep_id:06d}.gif")
-    imageio.mimsave(out_path, frames, fps=10)
+    # Save output
+    if save_as_mp4:
+        out_path = os.path.join(OUTPUT_DIR, f"episode_{ep_id:06d}.mp4")
+        imageio.mimsave(out_path, frames, fps=10, format="mp4")
+    else:
+        out_path = os.path.join(OUTPUT_DIR, f"episode_{ep_id:06d}.gif")
+        imageio.mimsave(out_path, frames, fps=10)
+
     print(f"Saved {out_path}")
 
 
@@ -197,5 +227,5 @@ if __name__ == "__main__":
     print(f"Loaded {len(episodes)} episodes")
 
     for ep_id, samples in episodes.items():
-        traj, traj_smooth, targets = convert_episode_to_global(samples)
-        create_episode_gif(ep_id, samples, traj, traj_smooth, targets)
+        speeds, traj, traj_smooth, targets = convert_episode_to_global(samples)
+        create_episode_gif(ep_id, samples, traj, traj_smooth, targets, speeds)

@@ -6,6 +6,7 @@ from collections import deque
 from typing import Dict, Iterable, List, Any
 import numpy as np
 from tqdm import tqdm
+from scipy.interpolate import splprep, splev
 
 # -------------------------
 # Keep only input fields you still want to carry through.
@@ -178,29 +179,156 @@ def preprocess_dataset(
     return out
 
 
-from scipy.signal import savgol_filter
-
-def smooth_traj(traj, window=21, poly=3):
+def smooth_traj(traj, smooth_factor=20, k=3, dt=0.1, speed=None, stop_thresh=0.2):
     """
-    Smooth trajectory using Savitzky-Golay filter.
-    
+    Smooth trajectory globally using cubic B-spline with optional stop handling.
+
     Args:
         traj: (N, 3) array [x, y, yaw]
-        window: odd int, filter window size
-        poly: polynomial order
-    
+        smooth_factor: spline smoothing (larger = smoother)
+        k: spline degree (default cubic)
+        dt: timestep between points (default 0.1s for 10Hz)
+        speed: (N,) array of ego speeds [m/s]. If given, stops are flattened.
+        stop_thresh: below this speed → treat as stop
+
     Returns:
-        traj_smooth: (N, 3) array smoothed
+        (N, 3) smoothed trajectory
     """
-    if len(traj) < window:
-        return traj  # not enough points to smooth
+    def _smooth_segment(seg_traj):
+        """Helper: smooth one moving segment."""
+        if len(seg_traj) < k + 1:
+            return seg_traj
 
-    x_smooth = savgol_filter(traj[:, 0], window, poly)
-    y_smooth = savgol_filter(traj[:, 1], window, poly)
+        x = seg_traj[:, 0].astype(float)
+        y = seg_traj[:, 1].astype(float)
 
-    # Recompute yaw from smoothed coords
-    dx = np.gradient(x_smooth)
-    dy = np.gradient(y_smooth)
-    yaw_smooth = np.arctan2(dy, dx)
+        # Time vector for this segment
+        time_full = np.arange(len(x)) * dt
 
-    return np.stack([x_smooth, y_smooth, yaw_smooth], axis=1).astype(np.float32)
+        # Deduplicate for fitting
+        unique_mask = np.append(True, (np.diff(x) != 0) | (np.diff(y) != 0))
+        x_fit, y_fit = x[unique_mask], y[unique_mask]
+        time_fit = time_full[unique_mask]
+
+        try:
+            tck, _ = splprep([x_fit, y_fit], u=time_fit,
+                             s=smooth_factor, k=min(k, len(x_fit) - 1))
+            x_s, y_s = splev(time_full, tck)
+            dx, dy = splev(time_full, tck, der=1)
+            yaw_s = np.arctan2(dy, dx)
+            return np.stack([x_s, y_s, yaw_s], axis=1)
+        except Exception as e:
+            print(f"[WARN] spline fitting failed, returning raw seg. Reason: {e}")
+            return seg_traj
+
+    # -------------------
+    # Case 1: No speed → normal smoothing
+    # -------------------
+    if speed is None:
+        return _smooth_segment(traj).astype(np.float32)
+
+    # -------------------
+    # Case 2: Speed given → stop-aware smoothing
+    # -------------------
+    smoothed = []
+    start = 0
+    while start < len(traj):
+        if speed[start] < stop_thresh:
+            # --- STOP segment ---
+            end = start
+            while end < len(traj) and speed[end] < stop_thresh:
+                end += 1
+            cx, cy = np.mean(traj[start:end, 0]), np.mean(traj[start:end, 1])
+            seg = np.column_stack([
+                np.full(end-start, cx),
+                np.full(end-start, cy),
+                np.zeros(end-start)  # yaw fixed later
+            ])
+            smoothed.append(seg)
+            start = end
+        else:
+            # --- MOVE segment ---
+            end = start
+            while end < len(traj) and speed[end] >= stop_thresh:
+                end += 1
+            seg = _smooth_segment(traj[start:end])
+            smoothed.append(seg)
+            start = end
+
+    smoothed = np.vstack(smoothed)
+
+    # Fix yaw for stops (inherit last moving yaw if available)
+    for i in range(1, len(smoothed)):
+        if np.allclose(smoothed[i, :2], smoothed[i-1, :2]):
+            smoothed[i, 2] = smoothed[i-1, 2]
+
+    return smoothed.astype(np.float32)
+
+
+
+def smooth_traj_global(traj, smooth_factor=40, k=2, dt=0.1, speed=None):
+    """
+    Smooth trajectory globally with cubic B-spline,
+    resampled according to real speed profile.
+
+    Args:
+        traj: (N, 3) array [x, y, yaw]
+        smooth_factor: spline smoothing (larger = smoother)
+        k: spline degree
+        dt: timestep between points (default 0.1s for 10Hz)
+        speed: (N,) array of ego speeds [m/s]. If given, 
+               resampling follows speed profile.
+
+    Returns:
+        (N, 3) smoothed trajectory
+    """
+    if len(traj) < k + 1:
+        return traj
+
+    x = traj[:, 0].astype(float)
+    y = traj[:, 1].astype(float)
+
+    # Original time vector
+    time_full = np.arange(len(x)) * dt
+
+    # Step 1: Fit spline on *all original points*
+    try:
+        tck, _ = splprep([x, y], u=time_full,
+                         s=smooth_factor, k=min(k, len(x) - 1))
+    except Exception as e:
+        print(f"[WARN] spline fitting failed, returning raw traj. Reason: {e}")
+        return traj
+
+    # Step 2: If no speed → evaluate directly at original time
+    if speed is None:
+        x_s, y_s = splev(time_full, tck)
+        dx, dy = splev(time_full, tck, der=1)
+        yaw_s = np.arctan2(dy, dx)
+        return np.stack([x_s, y_s, yaw_s], axis=1).astype(np.float32)
+
+    # Step 3: Compute cumulative distance from speed
+    dist = np.cumsum(speed * dt)  # integrate speed
+    dist -= dist[0]               # normalize to start at 0
+
+    # Step 4: Build mapping from arc-length to spline parameter
+    # Sample spline densely to approximate arc-length
+    u_dense = np.linspace(time_full[0], time_full[-1], len(x)*5)
+    x_dense, y_dense = splev(u_dense, tck)
+    dx_dense, dy_dense = np.gradient(x_dense), np.gradient(y_dense)
+    seglen = np.sqrt(dx_dense**2 + dy_dense**2)
+    arc = np.cumsum(seglen)
+    arc -= arc[0]
+    arc /= arc[-1]  # normalize [0,1]
+
+    # Normalize dist to [0,1] as well
+    dist_norm = dist / dist[-1] if dist[-1] > 0 else dist
+
+    # Step 5: Interpolate arc-length → spline parameter
+    u_resample = np.interp(dist_norm, arc, u_dense)
+
+    # Step 6: Evaluate spline at resampled params
+    x_s, y_s = splev(u_resample, tck)
+    dx, dy = splev(u_resample, tck, der=1)
+    yaw_s = np.arctan2(dy, dx)
+
+    return np.stack([x_s, y_s, yaw_s], axis=1).astype(np.float32)

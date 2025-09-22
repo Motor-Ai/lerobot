@@ -7,16 +7,18 @@ from torch.nn.utils.rnn import pad_sequence
 import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from mai.utils.utils import target_in_ego
+from mai.utils.utils import ego_xy
 
 
 SMOL = True
+use_lora = True
+use_qlora = True
 MODEL_ID = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if SMOL else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-DEVICE = "cuda:2"
+DEVICE = "auto" #"cuda:2"
 VIDEO_BASE_PATH = "/home/user_lerobot/.cache/huggingface/lerobot/yaak-ai/lerobot-driving-school/videos/chunk-000/observation.images.front_left"
 
 
-def load_model(use_lora=False, use_qlora=False, smol=True):
+def load_model(use_lora=False, use_qlora=False):
     model_id = MODEL_ID
     processor = AutoProcessor.from_pretrained(model_id)
 
@@ -83,23 +85,29 @@ def train(model, processor, dataset):
             heading_deg = example["observation.state.vehicle"][1]
 
             # last waypoint as target (lat, lon) => note your arrays are [X=lon list], [Y=lat list]
-            target_lon = example["observation.state.waypoints"][0][-1]
-            target_lat = example["observation.state.waypoints"][1][-1]
+            target_mid_index = len(example["observation.state.waypoints"][0]) // 2
 
-            x_fwd, y_left, z_up = target_in_ego(lat0, lon0, heading_deg, target_lat, target_lon)
+            x_fwd_0, y_left_0 = ego_xy(lat0, lon0, heading_deg, 
+                                   example["observation.state.waypoints"][1][target_mid_index], 
+                                   example["observation.state.waypoints"][0][target_mid_index])
+            x_fwd_1, y_left_1 = ego_xy(lat0, lon0, heading_deg, 
+                                   example["observation.state.waypoints"][1][-1], 
+                                   example["observation.state.waypoints"][0][-1])
 
             # Build dynamic text
             text_instruction = (
                 f"Current speed: {example['observation.state.vehicle'][0]:.3f}. "
-                f"Target (in ego frame): x={x_fwd:.2f} m, y={y_left:.2f} m. "
-                "Drive to the target while adhering to traffic rules and regulations."
+                f"Target (in ego frame): x1={x_fwd_0:.2f} m, y1={y_left_0:.2f} m and  x2={x_fwd_1:.2f} m, y2={y_left_1:.2f} m"
+                "Drive to the target points while adhering to traffic rules and regulations."
             )
             
             user_content = [{"type": "text", 
                              "text": f"{text_instruction}"}]
             user_content.append({"type": "video", 
                                  "path": example["video_path"], 
-                                 "max_pixels": 360 * 420, 
+                                 #  "max_pixels": 360 * 420, 
+                                 "height": 360,   # desired height in pixels
+                                 "width": 420,    # desired width in pixels
                                  "fps": 2.0 })
 
             messages = [
@@ -175,8 +183,8 @@ def train(model, processor, dataset):
 
     training_args = TrainingArguments(
         num_train_epochs=5,
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=1,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=8,
         warmup_steps=50,
         learning_rate=1e-4,
         weight_decay=0.01,
@@ -186,8 +194,8 @@ def train(model, processor, dataset):
         save_total_limit=1,
         optim="paged_adamw_8bit", # for 8-bit, keep paged_adamw_8bit, else adamw_hf
         bf16=True,
-        output_dir=f"./outputs/bs_8_{model_name}-driving",
-        hub_model_id=f"bs_8_{model_name}-driving",
+        output_dir=f"./outputs/bs_2_{model_name}-driving",
+        hub_model_id=f"bs_2_{model_name}-driving",
         remove_unused_columns=False,
         report_to="tensorboard",
         dataloader_pin_memory=False, 
@@ -206,11 +214,7 @@ def train(model, processor, dataset):
 
 
 def main():
-    use_lora = True
-    use_qlora = True
-    smol = True
-
-    model, processor = load_model(use_lora, use_qlora, smol)
+    model, processor = load_model(use_lora, use_qlora)
     dataset = load_dataset("yaak-ai/lerobot-driving-school")
     train(model, processor, dataset)
 
